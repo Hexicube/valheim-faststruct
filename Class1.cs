@@ -8,7 +8,7 @@ using UnityEngine;
 
 namespace hexi.valheim.faststruct
 {
-    [BepInPlugin(ID, "Fast Structure Support Calculation", "0.1.0")]
+    [BepInPlugin(ID, "Fast Structure Support Calculation", "0.2.0")]
     public class FastStructureSupport : BaseUnityPlugin
     {
         private const string ID = "hexi.FastStructure";
@@ -31,7 +31,7 @@ namespace hexi.valheim.faststruct
     public class WearNTearTracked
     {
         public WearNTear Wear;
-        public float LastSupport;
+        public float LastSupport, MaxSupport;
         public StructureData Structure;
     }
 
@@ -51,6 +51,8 @@ namespace hexi.valheim.faststruct
         
         public static readonly List<WearNTear> AwaitingInit = new List<WearNTear>();
         public static readonly List<WearNTear> AddNow = new List<WearNTear>();
+        
+        public static readonly List<WearNTearTracked> MaxSupport = new List<WearNTearTracked>();
 
         public static WearNTearTracked GetStructure(WearNTear piece)
         {
@@ -80,10 +82,12 @@ namespace hexi.valheim.faststruct
                 return;
             }
             
+            piece.GetMaterialProperties(out float maxSupport, out var _, out var _, out var _);
             WearNTearTracked tracked = new WearNTearTracked
             {
                 Wear = piece,
-                LastSupport = piece.GetSupport()
+                LastSupport = piece.m_support,
+                MaxSupport = maxSupport
             };
             
             List<StructureData> nearbyStructures = new List<StructureData>();
@@ -158,8 +162,31 @@ namespace hexi.valheim.faststruct
             
             foreach (var structure in Structures)
             {
-                if (!structure.Sleeping)
+                if (structure.Sleeping)
                 {
+                    // make sure terrain-supported pieces always tick (should also cover other unusual cases like being supported by mineables)
+                    
+                    // NOTE: this will also cause pieces supported by more structurally sound pieces to always tick (wood on stone)
+                    // should have minimal impact, pieces already have early-exit code when their support is unchanged
+                    foreach (var piece in structure.Pieces)
+                    {
+                        bool contains = MaxSupport.Contains(piece);
+                        if (piece.Wear.m_support == piece.MaxSupport) {
+                            Ticking.Add(piece.Wear); // needs to tick to check for no longer being supported
+                            if (!contains) MaxSupport.Add(piece);
+                        }
+                        else if (contains)
+                        {
+                            // max support piece no longer has max support, probably lost terrain support; building needs to wake
+                            piece.LastSupport = piece.Wear.m_support;
+                            structure.Sleeping = false;
+                            structure.IdleTicks = 0;
+                            Ticking.Add(piece.Wear);
+                            MaxSupport.Remove(piece);
+                        }
+                    }
+                }
+                else {
                     foreach (var piece in structure.Pieces)
                     {
                         float diff = piece.Wear.m_support - piece.LastSupport;
@@ -177,6 +204,17 @@ namespace hexi.valheim.faststruct
                         
                         // needs to be here because updates dont go through all pieces
                         if (piece == structure.Pieces.Last()) structure.IdleTicks++;
+                        
+                        bool contains = MaxSupport.Contains(piece);
+                        if (piece.LastSupport == piece.MaxSupport)
+                        {
+                            if (!contains) MaxSupport.Add(piece);
+                        }
+                        else if (contains)
+                        {
+                            MaxSupport.Remove(piece);
+                            structure.IdleTicks = 0;
+                        }
                     }
 
                     if (structure.IdleTicks >= NumTicksBeforeSleep) structure.Sleeping = true;
